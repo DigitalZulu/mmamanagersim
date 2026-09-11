@@ -1,700 +1,1925 @@
+
 "use client"
 
 import { useMemo } from "react"
-import { generateWorld } from "@/lib/worldGenerator"
-import type { Fighter } from "@/lib/types"
+
+import {
+  generateWorld,
+} from "@/lib/worldGenerator"
+
+import {
+  generateAllMatchups,
+} from "@/lib/matchmakingSystem"
+
+import {
+  generateEvents,
+  type Event,
+} from "@/lib/eventSystem"
+
+import {
+  simulateFight,
+} from "@/lib/fightSimulation"
+
+import {
+  calculateRankingScore,
+  calculateDivisionRankings,
+} from "@/lib/rankingSystem"
 
 export default function TestWorldPage() {
-const world = useMemo(() => generateWorld(), [])
+  const world = useMemo(() => {
+    return generateWorld()
+  }, [])
 
-const fighterLookup = useMemo(() => {
-return new Map(
-world.fighters.map((fighter) => [
-fighter.id,
-fighter,
-])
-)
-}, [world.fighters])
+  const fighters = world.fighters
+  const divisions = world.divisions
+  const promotions = world.promotions
 
-const averageStrength = useMemo(() => {
-if (world.fighters.length === 0) {
-return 0
-}
+  const promotionNames = useMemo(() => {
+    return promotions.reduce(
+      (map, promotion) => {
+        map[promotion.id] = promotion.name
+        return map
+      },
+      {} as Record<string, string>
+    )
+  }, [promotions])
 
+  // --------------------------------------------------
+  // MATCHMAKING
+  // --------------------------------------------------
 
-const total = world.fighters.reduce(
-  (sum, fighter) =>
-    sum + getFighterStrength(fighter),
-  0
-)
-
-return total / world.fighters.length
-
-
-}, [world.fighters])
-
-const promotionStats = useMemo(() => {
-return world.promotions.map((promotion) => {
-const promotionFighters = promotion.roster
-.map((fighterId) =>
-fighterLookup.get(fighterId)
-)
-.filter(
-(
-fighter
-): fighter is NonNullable<
-typeof fighter
-> => Boolean(fighter)
-)
-
-
-  const avgStrength =
-    promotionFighters.length > 0
-      ? promotionFighters.reduce(
-          (sum, fighter) =>
-            sum + getFighterStrength(fighter),
-          0
-        ) / promotionFighters.length
-      : 0
-
-  const divisionMap = new Map<
-    string,
-    {
-      gender: string
-      weightClass: string
-      fighters: typeof promotionFighters
-    }
-  >()
-
-  promotionFighters.forEach((fighter) => {
-    const key =
-      fighter.gender +
-      "-" +
-      fighter.weightClass
-
-    if (!divisionMap.has(key)) {
-      divisionMap.set(key, {
-        gender: fighter.gender,
-        weightClass: fighter.weightClass,
-        fighters: [],
-      })
+  const matchups = useMemo(() => {
+    if (
+      fighters.length === 0 ||
+      divisions.length === 0
+    ) {
+      return []
     }
 
-    divisionMap
-      .get(key)!
-      .fighters.push(fighter)
-  })
+    return generateAllMatchups(
+      divisions,
+      fighters
+    )
+  }, [fighters, divisions])
 
-  const divisions = Array.from(
-    divisionMap.values()
-  )
-    .map((division) => {
-      const divisionAverage =
-        division.fighters.length > 0
-          ? division.fighters.reduce(
-              (sum, fighter) =>
-                sum +
-                getFighterStrength(fighter),
-              0
-            ) /
-            division.fighters.length
-          : 0
+  // --------------------------------------------------
+  // EVENTS
+  // --------------------------------------------------
+
+  const events = useMemo(() => {
+    if (
+      matchups.length === 0 ||
+      fighters.length === 0 ||
+      promotions.length === 0
+    ) {
+      return []
+    }
+
+    return generateEvents(
+      matchups,
+      fighters,
+      divisions,
+      promotionNames,
+      "2026-09-12",
+      2,
+      10
+    )
+  }, [
+    matchups,
+    fighters,
+    divisions,
+    promotions,
+    promotionNames,
+  ])
+
+  // --------------------------------------------------
+  // EVENT VERIFICATION
+  // --------------------------------------------------
+
+  const eventVerification = useMemo(() => {
+    let duplicateFights = 0
+    let duplicateFighters = 0
+    let invalidPromotions = 0
+    let invalidDates = 0
+    let invalidOrder = 0
+    let invalidRounds = 0
+    let invalidFighters = 0
+
+    const fighterLookup = new Map(
+      fighters.map((fighter) => [
+        fighter.id,
+        fighter,
+      ])
+    )
+
+    const matchupKeys = new Set<string>()
+
+    for (const event of events) {
+      // IMPORTANT:
+      // This set resets for every event.
+      //
+      // A fighter appearing on two DIFFERENT events
+      // is completely normal.
+      //
+      // We only want to detect a fighter being booked
+      // twice on the SAME event.
+      const eventFighterIds = new Set<string>()
+
+      for (
+        let i = 0;
+        i < event.fights.length;
+        i += 1
+      ) {
+        const scheduledFight =
+          event.fights[i]
+
+        const matchup =
+          scheduledFight.matchup
+
+        const fighterA =
+          fighterLookup.get(
+            matchup.fighterAId
+          )
+
+        const fighterB =
+          fighterLookup.get(
+            matchup.fighterBId
+          )
+
+        // ------------------------------------------
+        // Fighter existence
+        // ------------------------------------------
+
+        if (!fighterA || !fighterB) {
+          invalidFighters += 1
+          continue
+        }
+
+        // ------------------------------------------
+        // Promotion
+        // ------------------------------------------
+
+        if (
+          matchup.promotionId !==
+          event.promotionId
+        ) {
+          invalidPromotions += 1
+        }
+
+        // ------------------------------------------
+        // Date
+        // ------------------------------------------
+
+        if (!event.date) {
+          invalidDates += 1
+        }
+
+        // ------------------------------------------
+        // Fight order
+        // ------------------------------------------
+
+        if (
+          scheduledFight.fightOrder !==
+          i + 1
+        ) {
+          invalidOrder += 1
+        }
+
+        // ------------------------------------------
+        // Rounds
+        // ------------------------------------------
+
+        if (
+          scheduledFight.configuration
+            .rounds !== 3 &&
+          scheduledFight.configuration
+            .rounds !== 5
+        ) {
+          invalidRounds += 1
+        }
+
+        // ------------------------------------------
+        // Same-event fighter duplication
+        // ------------------------------------------
+
+        if (
+          eventFighterIds.has(
+            fighterA.id
+          )
+        ) {
+          duplicateFighters += 1
+        }
+
+        if (
+          eventFighterIds.has(
+            fighterB.id
+          )
+        ) {
+          duplicateFighters += 1
+        }
+
+        eventFighterIds.add(
+          fighterA.id
+        )
+
+        eventFighterIds.add(
+          fighterB.id
+        )
+
+        // ------------------------------------------
+        // Exact/reverse matchup duplication
+        // ------------------------------------------
+
+        const fighterIds = [
+          fighterA.id,
+          fighterB.id,
+        ].sort()
+
+        const matchupKey =
+          fighterIds.join("::")
+
+        if (
+          matchupKeys.has(matchupKey)
+        ) {
+          duplicateFights += 1
+        }
+
+        matchupKeys.add(matchupKey)
+      }
+    }
+
+    return {
+      duplicateFights,
+      duplicateFighters,
+      invalidPromotions,
+      invalidDates,
+      invalidOrder,
+      invalidRounds,
+      invalidFighters,
+    }
+  }, [events, fighters])
+
+  const allChecksPassed =
+    eventVerification
+      .duplicateFights === 0 &&
+    eventVerification
+      .duplicateFighters === 0 &&
+    eventVerification
+      .invalidPromotions === 0 &&
+    eventVerification
+      .invalidDates === 0 &&
+    eventVerification
+      .invalidOrder === 0 &&
+    eventVerification
+      .invalidRounds === 0 &&
+    eventVerification
+      .invalidFighters === 0
+
+  // --------------------------------------------------
+  // EVENT TOTALS
+  // --------------------------------------------------
+
+  const scheduledFights =
+    events.reduce(
+      (total, event) =>
+        total + event.fights.length,
+      0
+    )
+
+  const scheduledFighterSlots =
+    scheduledFights * 2
+
+  // --------------------------------------------------
+  // FIGHTER LOOKUP
+  // --------------------------------------------------
+
+  const fighterLookup = useMemo(() => {
+    return new Map(
+      fighters.map((fighter) => [
+        fighter.id,
+        fighter,
+      ])
+    )
+  }, [fighters])
+
+  // --------------------------------------------------
+  // MATCHMAKING VERIFICATION
+  // --------------------------------------------------
+
+  const matchmakingVerification =
+    useMemo(() => {
+      let selfMatchups = 0
+      let invalidFighterReferences = 0
+      let invalidDivisionReferences = 0
+      let invalidPromotionReferences = 0
+
+      for (const matchup of matchups) {
+        // ------------------------------------------
+        // Self-match protection
+        // ------------------------------------------
+
+        if (
+          matchup.fighterAId ===
+          matchup.fighterBId
+        ) {
+          selfMatchups += 1
+        }
+
+        // ------------------------------------------
+        // Fighter references
+        // ------------------------------------------
+
+        const fighterA =
+          fighterLookup.get(
+            matchup.fighterAId
+          )
+
+        const fighterB =
+          fighterLookup.get(
+            matchup.fighterBId
+          )
+
+        if (!fighterA || !fighterB) {
+          invalidFighterReferences += 1
+        }
+
+        // ------------------------------------------
+        // Division reference
+        // ------------------------------------------
+
+        const division =
+          divisions.find(
+            (division) =>
+              division.id ===
+              matchup.divisionId
+          )
+
+        if (!division) {
+          invalidDivisionReferences += 1
+          continue
+        }
+
+        // ------------------------------------------
+        // Promotion reference
+        // ------------------------------------------
+
+        if (
+          matchup.promotionId !==
+          division.promotionId
+        ) {
+          invalidPromotionReferences += 1
+        }
+      }
 
       return {
-        gender: division.gender,
-        weightClass:
-          division.weightClass,
-        fighters: division.fighters,
-        averageStrength:
-          divisionAverage,
+        totalMatchups:
+          matchups.length,
+
+        selfMatchups,
+
+        invalidFighterReferences,
+
+        invalidDivisionReferences,
+
+        invalidPromotionReferences,
+      }
+    }, [
+      matchups,
+      divisions,
+      fighterLookup,
+    ])
+
+  const matchmakingAllChecksPassed =
+    matchmakingVerification
+      .totalMatchups > 0 &&
+    matchmakingVerification
+      .selfMatchups === 0 &&
+    matchmakingVerification
+      .invalidFighterReferences === 0 &&
+    matchmakingVerification
+      .invalidDivisionReferences === 0 &&
+    matchmakingVerification
+      .invalidPromotionReferences === 0
+
+  // --------------------------------------------------
+  // RANKINGS SYSTEM
+  // --------------------------------------------------
+
+  const calculatedRankings = useMemo(() => {
+    return divisions.map((division) => {
+      try {
+        const rankings =
+          calculateDivisionRankings(
+            division,
+            fighters
+          )
+
+        return {
+          division,
+          rankings,
+          error: false,
+        }
+      } catch {
+        return {
+          division,
+          rankings: [],
+          error: true,
+        }
       }
     })
-    .sort((a, b) => {
-      if (a.gender !== b.gender) {
-        return a.gender === "Male" ? -1 : 1
+  }, [divisions, fighters])
+
+  // --------------------------------------------------
+  // RANKINGS VERIFICATION
+  // --------------------------------------------------
+
+  const rankingsVerification = useMemo(() => {
+    let emptyDivisions = 0
+    let invalidFighterReferences = 0
+    let invalidDivisionMembership = 0
+    let duplicateFighters = 0
+    let invalidScores = 0
+    let invalidRankingOrder = 0
+    let rankingErrors = 0
+    let storedRankingMismatches = 0
+
+    let totalRankedFighters = 0
+
+    for (const result of calculatedRankings) {
+      const {
+        division,
+        rankings,
+        error,
+      } = result
+
+      if (error) {
+        rankingErrors += 1
+        continue
       }
 
-      return (
-        getDivisionOrder(
-          a.weightClass
-        ) -
-        getDivisionOrder(
-          b.weightClass
-        )
-      )
-    })
+      if (division.fighterIds.length === 0) {
+        emptyDivisions += 1
+      }
 
-  return {
-    promotion,
-    fighterCount:
-      promotionFighters.length,
-    avgStrength,
-    divisions,
-  }
-})
+      totalRankedFighters += rankings.length
 
+      const seenFighters = new Set<string>()
 
-}, [world.promotions, fighterLookup])
+      for (
+        let i = 0;
+        i < rankings.length;
+        i += 1
+      ) {
+        const fighterId = rankings[i]
+        const fighter =
+          fighterLookup.get(fighterId)
 
-const weightClassStats = useMemo(() => {
-const stats = new Map<
-string,
-{
-gender: string
-weightClass: string
-count: number
-}
->()
+        if (!fighter) {
+          invalidFighterReferences += 1
+          continue
+        }
 
+        if (
+          !division.fighterIds.includes(
+            fighterId
+          )
+        ) {
+          invalidDivisionMembership += 1
+        }
 
-world.fighters.forEach((fighter) => {
-  const key =
-    fighter.gender +
-    "-" +
-    fighter.weightClass
+        if (
+          seenFighters.has(fighterId)
+        ) {
+          duplicateFighters += 1
+        }
 
-  if (!stats.has(key)) {
-    stats.set(key, {
-      gender: fighter.gender,
-      weightClass:
-        fighter.weightClass,
-      count: 0,
-    })
-  }
+        seenFighters.add(fighterId)
 
-  stats.get(key)!.count++
-})
+        const currentScore =
+          calculateRankingScore(
+            fighter
+          )
 
-return Array.from(stats.values()).sort(
-  (a, b) => {
-    if (a.gender !== b.gender) {
-      return a.gender === "Male" ? -1 : 1
+        if (
+          !Number.isFinite(
+            currentScore
+          ) ||
+          currentScore <= 0
+        ) {
+          invalidScores += 1
+        }
+
+        if (i > 0) {
+          const previousFighter =
+            fighterLookup.get(
+              rankings[i - 1]
+            )
+
+          if (previousFighter) {
+            const previousScore =
+              calculateRankingScore(
+                previousFighter
+              )
+
+            if (
+              currentScore >
+              previousScore
+            ) {
+              invalidRankingOrder += 1
+            }
+          }
+        }
+      }
+
+      if (
+        rankings.length !==
+        division.rankings.length
+      ) {
+        storedRankingMismatches += 1
+      } else {
+        for (
+          let i = 0;
+          i < rankings.length;
+          i += 1
+        ) {
+          if (
+            rankings[i] !==
+            division.rankings[i]
+          ) {
+            storedRankingMismatches += 1
+            break
+          }
+        }
+      }
     }
 
+    return {
+      divisionsRanked:
+        calculatedRankings.length,
+      totalRankedFighters,
+      emptyDivisions,
+      invalidFighterReferences,
+      invalidDivisionMembership,
+      duplicateFighters,
+      invalidScores,
+      invalidRankingOrder,
+      rankingErrors,
+      storedRankingMismatches,
+    }
+  }, [
+    calculatedRankings,
+    fighterLookup,
+  ])
+
+  const rankingsAllChecksPassed =
+    rankingsVerification.divisionsRanked ===
+      divisions.length &&
+    rankingsVerification.emptyDivisions ===
+      0 &&
+    rankingsVerification.invalidFighterReferences ===
+      0 &&
+    rankingsVerification.invalidDivisionMembership ===
+      0 &&
+    rankingsVerification.duplicateFighters ===
+      0 &&
+    rankingsVerification.invalidScores ===
+      0 &&
+    rankingsVerification.invalidRankingOrder ===
+      0 &&
+    rankingsVerification.rankingErrors ===
+      0 &&
+    rankingsVerification.storedRankingMismatches ===
+      0
+
+  // --------------------------------------------------
+  // FIGHT SIMULATION INSPECTOR
+  // --------------------------------------------------
+
+  const simulatedFights = useMemo(() => {
+    if (matchups.length === 0) {
+      return []
+    }
+
+    return matchups
+      .map((matchup) => {
+        const fighterA =
+          fighterLookup.get(
+            matchup.fighterAId
+          )
+
+        const fighterB =
+          fighterLookup.get(
+            matchup.fighterBId
+          )
+
+        if (!fighterA || !fighterB) {
+          return null
+        }
+
+        return simulateFight(
+          fighterA,
+          fighterB
+        )
+      })
+      .filter(Boolean)
+  }, [
+    matchups,
+    fighterLookup,
+  ])
+
+  const simulationResults =
+    simulatedFights.filter(
+      (result) => result !== null
+    )
+
+  const fighterAWins =
+    simulationResults.filter(
+      (result) =>
+        result.winnerId ===
+        result.fighterAId
+    ).length
+
+  const fighterBWins =
+    simulationResults.filter(
+      (result) =>
+        result.winnerId ===
+        result.fighterBId
+    ).length
+
+  const koCount =
+    simulationResults.filter(
+      (result) =>
+        result.method === "KO"
+    ).length
+
+  const tkoCount =
+    simulationResults.filter(
+      (result) =>
+        result.method === "TKO"
+    ).length
+
+  const submissionCount =
+    simulationResults.filter(
+      (result) =>
+        result.method ===
+        "Submission"
+    ).length
+
+  const decisionCount =
+    simulationResults.filter(
+      (result) =>
+        result.method ===
+        "Decision"
+    ).length
+
+  // --------------------------------------------------
+  // HELPERS
+  // --------------------------------------------------
+
+  function getFighterName(
+    fighterId: string
+  ) {
+    const fighter =
+      fighterLookup.get(fighterId)
+
+    if (!fighter) {
+      return "Unknown Fighter"
+    }
+
+    return `${fighter.firstName} ${fighter.lastName}`
+  }
+
+  function getPromotionName(
+    promotionId: string
+  ) {
     return (
-      getDivisionOrder(
-        a.weightClass
-      ) -
-      getDivisionOrder(
-        b.weightClass
-      )
+      promotionNames[promotionId] ??
+      "Unknown Promotion"
     )
   }
-)
 
+  return (
+    <main className="min-h-screen bg-black px-6 py-10 text-white">
+      <div className="mx-auto max-w-7xl space-y-10">
 
-}, [world.fighters])
+        {/* ================================================== */}
+        {/* HEADER */}
+        {/* ================================================== */}
 
-const nationalityStats = useMemo(() => {
-const stats = new Map<
-string,
-number
->()
+        <section>
+          <div className="mb-2 text-sm font-semibold uppercase tracking-[0.25em] text-red-500">
+            MMA Manager
+          </div>
 
+          <h1 className="text-4xl font-black tracking-tight">
+            Event / Calendar Inspector
+          </h1>
 
-world.fighters.forEach((fighter) => {
-  stats.set(
-    fighter.nationality,
-    (stats.get(
-      fighter.nationality
-    ) ?? 0) + 1
-  )
-})
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-zinc-400">
+            Inspecting the current world generation,
+            matchmaking, championship state, rankings,
+            event scheduling, fight simulation, fight
+            results and odds systems.
+          </p>
+        </section>
 
-return Array.from(stats.entries()).sort(
-  (a, b) => b[1] - a[1]
-)
+        {/* ================================================== */}
+        {/* EVENT SUMMARY */}
+        {/* ================================================== */}
 
+        <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
 
-}, [world.fighters])
-
-const freeAgentFighters = useMemo(() => {
-return world.freeAgents
-.map((fighterId) =>
-fighterLookup.get(fighterId)
-)
-.filter(
-(
-fighter
-): fighter is NonNullable<
-typeof fighter
-> => Boolean(fighter)
-)
-}, [world.freeAgents, fighterLookup])
-
-const strongestFighters = useMemo(() => {
-return [...world.fighters]
-.sort(
-(a, b) =>
-getFighterStrength(b) -
-getFighterStrength(a)
-)
-.slice(0, 10)
-}, [world.fighters])
-
-return ( <main className="min-h-screen bg-black px-4 py-8 text-white sm:px-6 lg:px-8"> <div className="mx-auto max-w-7xl">
-
-
-    <div className="mb-8">
-      <p className="mb-2 text-xs font-semibold uppercase tracking-[0.25em] text-red-500">
-        Fight Manager Developer Tools
-      </p>
-
-      <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">
-        🌎 MMA World Inspector
-      </h1>
-
-      <p className="mt-2 max-w-3xl text-sm text-zinc-400">
-        Temporary development page used to
-        inspect the generated MMA universe
-        before we connect it to the actual
-        game.
-      </p>
-    </div>
-
-    <section className="mb-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      <StatCard
-        label="Total Fighters"
-        value={world.fighters.length}
-      />
-
-      <StatCard
-        label="AI Promotions"
-        value={world.promotions.length}
-      />
-
-      <StatCard
-        label="Free Agents"
-        value={world.freeAgents.length}
-      />
-
-      <StatCard
-        label="Avg. Strength"
-        value={averageStrength.toFixed(1)}
-      />
-    </section>
-
-    <section className="mb-10">
-      <SectionHeading>
-        🏢 AI Promotions
-      </SectionHeading>
-
-      <div className="space-y-6">
-        {promotionStats.map(
-          ({
-            promotion,
-            fighterCount,
-            avgStrength,
-            divisions,
-          }) => (
-            <div
-              key={promotion.id}
-              className="rounded-2xl border border-zinc-800 bg-zinc-950 p-5"
-            >
-              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-                <div>
-                  <h2 className="text-xl font-bold">
-                    {promotion.name}
-                  </h2>
-
-                  <p className="mt-1 text-sm text-zinc-400">
-                    {promotion.tier}
-                    {" · "}
-                    {promotion.style}
-                  </p>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                  <MiniStat
-                    label="Fighters"
-                    value={fighterCount}
-                  />
-
-                  <MiniStat
-                    label="Rep"
-                    value={promotion.reputation}
-                  />
-
-                  <MiniStat
-                    label="Popularity"
-                    value={promotion.popularity}
-                  />
-
-                  <MiniStat
-                    label="Avg Strength"
-                    value={avgStrength.toFixed(1)}
-                  />
-                </div>
-              </div>
-
-              <div className="mt-6 border-t border-zinc-800 pt-5">
-                <div className="mb-4 flex items-center justify-between">
-                  <h3 className="text-sm font-semibold uppercase tracking-wider text-zinc-300">
-                    Division Breakdown
-                  </h3>
-
-                  <span className="text-xs text-zinc-600">
-                    {divisions.length} active divisions
-                  </span>
-                </div>
-
-                {divisions.length === 0 ? (
-                  <p className="text-sm text-zinc-500">
-                    No fighters assigned.
-                  </p>
-                ) : (
-                  <div className="overflow-hidden rounded-xl border border-zinc-800">
-                    <div className="grid grid-cols-[1fr_auto_auto] gap-4 bg-zinc-900 px-4 py-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">
-                      <span>Division</span>
-                      <span>Fighters</span>
-                      <span>Avg Strength</span>
-                    </div>
-
-                    <div className="divide-y divide-zinc-800">
-                      {divisions.map(
-                        (division) => (
-                          <div
-                            key={
-                              division.gender +
-                              "-" +
-                              division.weightClass
-                            }
-                            className="grid grid-cols-[1fr_auto_auto] items-center gap-4 px-4 py-3"
-                          >
-                            <div>
-                              <p className="text-sm font-medium text-zinc-200">
-                                {formatDivisionName(
-                                  division.gender,
-                                  division.weightClass
-                                )}
-                              </p>
-                            </div>
-
-                            <span className="text-sm font-semibold text-zinc-300">
-                              {
-                                division
-                                  .fighters
-                                  .length
-                              }
-                            </span>
-
-                            <span className="text-sm font-semibold text-zinc-300">
-                              {division.averageStrength.toFixed(
-                                1
-                              )}
-                            </span>
-                          </div>
-                        )
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
+          <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-5">
+            <div className="text-xs uppercase tracking-wider text-zinc-500">
+              Events Generated
             </div>
-          )
-        )}
-      </div>
-    </section>
 
-    <section className="mb-10">
-      <SectionHeading>
-        🥊 Weight Class Distribution
-      </SectionHeading>
+            <div className="mt-2 text-3xl font-black">
+              {events.length}
+            </div>
+          </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {weightClassStats.map(
-          (division) => (
+          <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-5">
+            <div className="text-xs uppercase tracking-wider text-zinc-500">
+              Scheduled Fights
+            </div>
+
+            <div className="mt-2 text-3xl font-black">
+              {scheduledFights}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-5">
+            <div className="text-xs uppercase tracking-wider text-zinc-500">
+              Fighter Slots
+            </div>
+
+            <div className="mt-2 text-3xl font-black">
+              {scheduledFighterSlots}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-5">
+            <div className="text-xs uppercase tracking-wider text-zinc-500">
+              Promotions
+            </div>
+
+            <div className="mt-2 text-3xl font-black">
+              {promotions.length}
+            </div>
+          </div>
+
+        </section>
+
+        {/* ================================================== */}
+        {/* MATCHMAKING VERIFICATION */}
+        {/* ================================================== */}
+
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
+
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+
+            <div>
+              <h2 className="text-xl font-bold">
+                Matchmaking System V1 Verification
+              </h2>
+
+              <p className="mt-1 text-sm text-zinc-500">
+                Verifying that generated matchup candidates
+                reference valid fighters and never create
+                self-matchups.
+              </p>
+            </div>
+
             <div
-              key={
-                division.gender +
-                "-" +
-                division.weightClass
+              className={`rounded-full border px-4 py-2 text-xs font-bold uppercase tracking-wider ${
+                matchmakingAllChecksPassed
+                  ? "border-green-500/30 bg-green-500/10 text-green-400"
+                  : "border-red-500/30 bg-red-500/10 text-red-400"
+              }`}
+            >
+              {matchmakingAllChecksPassed
+                ? "✓ All checks passed"
+                : "✕ Verification failed"}
+            </div>
+
+          </div>
+
+          <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+
+            <VerificationItem
+              label="Matchups Generated"
+              passed={
+                matchmakingVerification
+                  .totalMatchups > 0
               }
-              className="rounded-xl border border-zinc-800 bg-zinc-950 p-4"
-            >
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <p className="text-sm font-medium text-zinc-200">
-                    {formatDivisionName(
-                      division.gender,
-                      division.weightClass
-                    )}
-                  </p>
+              value={`${matchmakingVerification.totalMatchups}`}
+            />
 
-                  <p className="mt-1 text-xs text-zinc-500">
-                    {division.gender ===
-                    "Male"
-                      ? "Men's division"
-                      : "Women's division"}
-                  </p>
-                </div>
+            <VerificationItem
+              label="Self-Matchups"
+              passed={
+                matchmakingVerification
+                  .selfMatchups === 0
+              }
+              value={`${matchmakingVerification.selfMatchups}`}
+            />
 
-                <span className="text-xl font-bold text-white">
-                  {division.count}
-                </span>
-              </div>
+            <VerificationItem
+              label="Fighter References"
+              passed={
+                matchmakingVerification
+                  .invalidFighterReferences === 0
+              }
+              value={
+                matchmakingVerification
+                  .invalidFighterReferences === 0
+                  ? "Valid"
+                  : `${matchmakingVerification.invalidFighterReferences} invalid`
+              }
+            />
+
+            <VerificationItem
+              label="Division References"
+              passed={
+                matchmakingVerification
+                  .invalidDivisionReferences === 0
+              }
+              value={
+                matchmakingVerification
+                  .invalidDivisionReferences === 0
+                  ? "Valid"
+                  : `${matchmakingVerification.invalidDivisionReferences} invalid`
+              }
+            />
+
+            <VerificationItem
+              label="Promotion References"
+              passed={
+                matchmakingVerification
+                  .invalidPromotionReferences === 0
+              }
+              value={
+                matchmakingVerification
+                  .invalidPromotionReferences === 0
+                  ? "Valid"
+                  : `${matchmakingVerification.invalidPromotionReferences} invalid`
+              }
+            />
+
+          </div>
+
+        </section>
+
+        {/* ================================================== */}
+        {/* EVENT VERIFICATION */}
+        {/* ================================================== */}
+
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
+
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+
+            <div>
+              <h2 className="text-xl font-bold">
+                Event System V1 Verification
+              </h2>
+
+              <p className="mt-1 text-sm text-zinc-500">
+                Basic structural checks for generated
+                events and fight cards.
+              </p>
             </div>
-          )
-        )}
-      </div>
-    </section>
 
-    <section className="mb-10">
-      <SectionHeading>
-        🌍 Nationality Distribution
-      </SectionHeading>
-
-      <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
-        {nationalityStats.map(
-          ([nationality, count]) => (
             <div
-              key={nationality}
-              className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3"
+              className={`rounded-full border px-4 py-2 text-xs font-bold uppercase tracking-wider ${
+                allChecksPassed
+                  ? "border-green-500/30 bg-green-500/10 text-green-400"
+                  : "border-red-500/30 bg-red-500/10 text-red-400"
+              }`}
             >
-              <span className="text-sm text-zinc-300">
-                {nationality}
-              </span>
-
-              <span className="font-semibold text-white">
-                {count}
-              </span>
+              {allChecksPassed
+                ? "✓ All basic checks passed"
+                : "✕ Verification failed"}
             </div>
-          )
-        )}
-      </div>
-    </section>
 
-    <section className="mb-10">
-      <SectionHeading>
-        🆓 Free Agents
-      </SectionHeading>
+          </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {freeAgentFighters
-          .slice(0, 18)
-          .map((fighter) => (
-            <FighterCard
-              key={fighter.id}
-              fighter={fighter}
+          <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+
+            <VerificationItem
+              label="Promotion"
+              passed={
+                eventVerification
+                  .invalidPromotions === 0
+              }
+              value={
+                eventVerification
+                  .invalidPromotions === 0
+                  ? "Valid"
+                  : `${eventVerification.invalidPromotions} invalid`
+              }
+            />
+
+            <VerificationItem
+              label="Dates"
+              passed={
+                eventVerification
+                  .invalidDates === 0
+              }
+              value={
+                eventVerification
+                  .invalidDates === 0
+                  ? "Valid"
+                  : `${eventVerification.invalidDates} invalid`
+              }
+            />
+
+            <VerificationItem
+              label="Order"
+              passed={
+                eventVerification
+                  .invalidOrder === 0
+              }
+              value={
+                eventVerification
+                  .invalidOrder === 0
+                  ? "Valid"
+                  : `${eventVerification.invalidOrder} invalid`
+              }
+            />
+
+            <VerificationItem
+              label="Rounds"
+              passed={
+                eventVerification
+                  .invalidRounds === 0
+              }
+              value={
+                eventVerification
+                  .invalidRounds === 0
+                  ? "Valid"
+                  : `${eventVerification.invalidRounds} invalid`
+              }
+            />
+
+            <VerificationItem
+              label="Duplicate Fights"
+              passed={
+                eventVerification
+                  .duplicateFights === 0
+              }
+              value={
+                eventVerification
+                  .duplicateFights === 0
+                  ? "0"
+                  : `${eventVerification.duplicateFights} found`
+              }
+            />
+
+            <VerificationItem
+              label="Same-Event Fighters"
+              passed={
+                eventVerification
+                  .duplicateFighters === 0
+              }
+              value={
+                eventVerification
+                  .duplicateFighters === 0
+                  ? "0"
+                  : `${eventVerification.duplicateFighters} found`
+              }
+            />
+
+            <VerificationItem
+              label="Fighter References"
+              passed={
+                eventVerification
+                  .invalidFighters === 0
+              }
+              value={
+                eventVerification
+                  .invalidFighters === 0
+                  ? "Valid"
+                  : `${eventVerification.invalidFighters} invalid`
+              }
+            />
+
+          </div>
+        </section>
+
+        {/* ================================================== */}
+        {/* EVENTS */}
+        {/* ================================================== */}
+
+        <section className="space-y-6">
+
+          <div>
+            <h2 className="text-2xl font-black">
+              Generated Events
+            </h2>
+
+            <p className="mt-2 text-sm text-zinc-500">
+              Event 1 is currently generated as a Fight
+              Night and Event 2 as a Championship Event.
+              Championship title-fight selection is the next
+              layer.
+            </p>
+          </div>
+
+          {events.map((event) => (
+            <EventCard
+              key={event.id}
+              event={event}
+              getFighterName={getFighterName}
+              getPromotionName={getPromotionName}
             />
           ))}
-      </div>
 
-      {freeAgentFighters.length > 18 && (
-        <p className="mt-4 text-center text-xs text-zinc-500">
-          Showing 18 of{" "}
-          {freeAgentFighters.length}{" "}
-          free agents
-        </p>
-      )}
-    </section>
+        </section>
 
-    <section>
-      <SectionHeading>
-        ⭐ Strongest Fighters Generated
-      </SectionHeading>
+        {/* ================================================== */}
+        {/* RANKINGS SYSTEM */}
+        {/* ================================================== */}
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        {strongestFighters.map(
-          (fighter, index) => (
-            <div
-              key={fighter.id}
-              className="rounded-xl border border-zinc-800 bg-zinc-950 p-4"
-            >
-              <div className="mb-3 flex items-center justify-between">
-                <span className="text-xs font-bold text-red-500">
-                  #{index + 1}
-                </span>
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
 
-                <span className="text-lg font-bold text-white">
-                  {getFighterStrength(
-                    fighter
-                  ).toFixed(1)}
-                </span>
-              </div>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-2xl font-black">
+                Rankings System V1 Verification
+              </h2>
 
-              <h3 className="font-semibold text-zinc-100">
-                {fighter.firstName}{" "}
-                {fighter.lastName}
-              </h3>
-
-              <p className="mt-1 font-mono text-[10px] text-zinc-600">
-                ID: {fighter.id}
-              </p>
-
-              <p className="mt-2 text-xs text-zinc-500">
-                {fighter.tier}
-                {" · "}
-                {fighter.weightClass}
-                {" · "}
-                {fighter.style}
-              </p>
-
-              <p className="mt-3 text-[10px] uppercase tracking-wider text-zinc-600">
-                Strength
+              <p className="mt-2 text-sm text-zinc-500">
+                Calculating fresh fighter rankings for every division
+                and comparing them against the rankings currently
+                stored on each division.
               </p>
             </div>
-          )
-        )}
+
+            <div
+              className={`rounded-full border px-4 py-2 text-xs font-bold uppercase tracking-wider ${
+                rankingsAllChecksPassed
+                  ? "border-green-500/30 bg-green-500/10 text-green-400"
+                  : "border-red-500/30 bg-red-500/10 text-red-400"
+              }`}
+            >
+              {rankingsAllChecksPassed
+                ? "✓ All checks passed"
+                : "✕ Verification failed"}
+            </div>
+          </div>
+
+          <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+
+            <VerificationItem
+              label="Divisions Ranked"
+              passed={
+                rankingsVerification
+                  .divisionsRanked ===
+                divisions.length
+              }
+              value={
+                rankingsVerification
+                  .divisionsRanked ===
+                divisions.length
+                  ? `${rankingsVerification.divisionsRanked} divisions`
+                  : `${rankingsVerification.divisionsRanked}/${divisions.length}`
+              }
+            />
+
+            <VerificationItem
+              label="Fighters Ranked"
+              passed={
+                rankingsVerification
+                  .totalRankedFighters > 0
+              }
+              value={`${rankingsVerification.totalRankedFighters}`}
+            />
+
+            <VerificationItem
+              label="Fighter References"
+              passed={
+                rankingsVerification
+                  .invalidFighterReferences === 0
+              }
+              value={
+                rankingsVerification
+                  .invalidFighterReferences === 0
+                  ? "Valid"
+                  : `${rankingsVerification.invalidFighterReferences} invalid`
+              }
+            />
+
+            <VerificationItem
+              label="Division Membership"
+              passed={
+                rankingsVerification
+                  .invalidDivisionMembership === 0
+              }
+              value={
+                rankingsVerification
+                  .invalidDivisionMembership === 0
+                  ? "Valid"
+                  : `${rankingsVerification.invalidDivisionMembership} invalid`
+              }
+            />
+
+            <VerificationItem
+              label="Duplicate Fighters"
+              passed={
+                rankingsVerification
+                  .duplicateFighters === 0
+              }
+              value={
+                rankingsVerification
+                  .duplicateFighters === 0
+                  ? "0"
+                  : `${rankingsVerification.duplicateFighters} found`
+              }
+            />
+
+            <VerificationItem
+              label="Ranking Scores"
+              passed={
+                rankingsVerification
+                  .invalidScores === 0
+              }
+              value={
+                rankingsVerification
+                  .invalidScores === 0
+                  ? "Valid"
+                  : `${rankingsVerification.invalidScores} invalid`
+              }
+            />
+
+            <VerificationItem
+              label="Ranking Order"
+              passed={
+                rankingsVerification
+                  .invalidRankingOrder === 0
+              }
+              value={
+                rankingsVerification
+                  .invalidRankingOrder === 0
+                  ? "Valid"
+                  : `${rankingsVerification.invalidRankingOrder} invalid`
+              }
+            />
+
+            <VerificationItem
+              label="Stored Rankings"
+              passed={
+                rankingsVerification
+                  .storedRankingMismatches === 0
+              }
+              value={
+                rankingsVerification
+                  .storedRankingMismatches === 0
+                  ? "Matches"
+                  : `${rankingsVerification.storedRankingMismatches} mismatches`
+              }
+            />
+
+            <VerificationItem
+              label="Ranking Errors"
+              passed={
+                rankingsVerification
+                  .rankingErrors === 0
+              }
+              value={
+                rankingsVerification
+                  .rankingErrors === 0
+                  ? "0"
+                  : `${rankingsVerification.rankingErrors} errors`
+              }
+            />
+
+          </div>
+
+          <div className="mt-8">
+
+            <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-400">
+              Division Rankings
+            </h3>
+
+            <p className="mt-1 text-xs text-zinc-600">
+              Showing the top 5 ranked fighters in each division.
+            </p>
+
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+
+              {calculatedRankings.map(
+                ({ division, rankings }) => {
+                  const champion =
+                    division.championId
+                      ? fighterLookup.get(
+                          division.championId
+                        )
+                      : undefined
+
+                  return (
+                    <div
+                      key={division.id}
+                      className="rounded-xl border border-zinc-800 bg-black p-5"
+                    >
+
+                      <div className="flex items-start justify-between gap-4">
+
+                        <div>
+
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-600">
+                            {division.id}
+                          </div>
+
+                          <div className="mt-1 text-lg font-black">
+                            {division.weightClass}
+                          </div>
+
+                          <div className="mt-1 text-xs text-zinc-600">
+                            {division.gender}
+                          </div>
+
+                        </div>
+
+                        {champion && (
+                          <div className="text-right">
+
+                            <div className="text-[9px] font-bold uppercase tracking-wider text-yellow-500">
+                              Champion
+                            </div>
+
+                            <div className="mt-1 text-xs font-bold text-yellow-400">
+                              {champion.firstName}{" "}
+                              {champion.lastName}
+                            </div>
+
+                          </div>
+                        )}
+
+                      </div>
+
+                      <div className="mt-5 space-y-2">
+
+                        {rankings
+                          .slice(0, 5)
+                          .map(
+                            (
+                              fighterId,
+                              index
+                            ) => {
+                              const fighter =
+                                fighterLookup.get(
+                                  fighterId
+                                )
+
+                              if (!fighter) {
+                                return null
+                              }
+
+                              const score =
+                                calculateRankingScore(
+                                  fighter
+                                )
+
+                              const isChampion =
+                                fighter.id ===
+                                division.championId
+
+                              return (
+                                <div
+                                  key={
+                                    fighter.id
+                                  }
+                                  className={`flex items-center justify-between rounded-lg border p-3 ${
+                                    isChampion
+                                      ? "border-yellow-500/30 bg-yellow-500/[0.03]"
+                                      : "border-zinc-800 bg-zinc-950"
+                                  }`}
+                                >
+
+                                  <div className="flex items-center gap-3">
+
+                                    <div
+                                      className={`flex h-8 w-8 items-center justify-center rounded-lg text-xs font-black ${
+                                        isChampion
+                                          ? "bg-yellow-500/10 text-yellow-400"
+                                          : "bg-zinc-900 text-zinc-500"
+                                      }`}
+                                    >
+                                      {index + 1}
+                                    </div>
+
+                                    <div>
+
+                                      <div
+                                        className={`text-sm font-bold ${
+                                          isChampion
+                                            ? "text-yellow-400"
+                                            : "text-zinc-200"
+                                        }`}
+                                      >
+                                        {
+                                          fighter.firstName
+                                        }{" "}
+                                        {
+                                          fighter.lastName
+                                        }
+                                      </div>
+
+                                      <div className="mt-1 text-[10px] text-zinc-600">
+                                        {fighter.tier} •{" "}
+                                        {fighter.wins}-
+                                        {fighter.losses}-
+                                        {fighter.draws}
+                                      </div>
+
+                                    </div>
+
+                                  </div>
+
+                                  <div className="text-right">
+
+                                    <div className="text-[9px] uppercase tracking-wider text-zinc-600">
+                                      Score
+                                    </div>
+
+                                    <div className="mt-1 text-sm font-black text-white">
+                                      {score.toFixed(2)}
+                                    </div>
+
+                                  </div>
+
+                                </div>
+                              )
+                            }
+                          )}
+
+                      </div>
+
+                    </div>
+                  )
+                }
+              )}
+
+            </div>
+          </div>
+        </section>
+
+        {/* ================================================== */}
+        {/* FIGHT SIMULATION */}
+        {/* ================================================== */}
+
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
+
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+
+            <div>
+
+              <h2 className="text-2xl font-black">
+                Fight Simulation Inspector
+              </h2>
+
+              <p className="mt-2 text-sm text-zinc-500">
+                Running the current Fight Simulation V1
+                against the raw matchmaking candidates.
+              </p>
+
+            </div>
+
+            <div className="rounded-full border border-zinc-700 px-4 py-2 text-xs font-bold uppercase tracking-wider text-zinc-400">
+              {simulationResults.length} simulated
+            </div>
+
+          </div>
+
+          {/* Simulation totals */}
+
+          <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
+
+            <SimulationStat
+              label="Fights"
+              value={simulationResults.length}
+            />
+
+            <SimulationStat
+              label="A Wins"
+              value={fighterAWins}
+            />
+
+            <SimulationStat
+              label="B Wins"
+              value={fighterBWins}
+            />
+
+            <SimulationStat
+              label="KO"
+              value={koCount}
+            />
+
+            <SimulationStat
+              label="TKO"
+              value={tkoCount}
+            />
+
+            <SimulationStat
+              label="Decision"
+              value={decisionCount}
+            />
+
+          </div>
+
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+
+            <SimulationStat
+              label="Submission"
+              value={submissionCount}
+            />
+
+            <SimulationStat
+              label="Invalid Results"
+              value={
+                matchups.length -
+                simulationResults.length
+              }
+            />
+
+          </div>
+
+          {/* Simulation sample */}
+
+          <div className="mt-8">
+
+            <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-400">
+              Sample Results
+            </h3>
+
+            <div className="mt-3 space-y-2">
+
+              {simulationResults
+                .slice(0, 10)
+                .map(
+                  (result, index) => (
+                    <div
+                      key={`${result.fighterAId}-${result.fighterBId}-${index}`}
+                      className="rounded-lg border border-zinc-800 bg-black p-4"
+                    >
+
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+
+                        <div className="text-sm font-semibold">
+
+                          <span
+                            className={
+                              result.winnerId ===
+                              result.fighterAId
+                                ? "text-green-400"
+                                : "text-zinc-400"
+                            }
+                          >
+                            {getFighterName(
+                              result.fighterAId
+                            )}
+                          </span>
+
+                          <span className="mx-2 text-zinc-700">
+                            vs
+                          </span>
+
+                          <span
+                            className={
+                              result.winnerId ===
+                              result.fighterBId
+                                ? "text-green-400"
+                                : "text-zinc-400"
+                            }
+                          >
+                            {getFighterName(
+                              result.fighterBId
+                            )}
+                          </span>
+
+                        </div>
+
+                        <div className="flex items-center gap-3 text-xs">
+
+                          <span className="font-bold uppercase text-green-400">
+                            Winner
+                          </span>
+
+                          <span className="text-zinc-500">
+                            {result.method}
+                          </span>
+
+                          <span className="text-zinc-600">
+                            R{result.round}
+                          </span>
+
+                        </div>
+
+                      </div>
+
+                    </div>
+                  )
+                )}
+
+            </div>
+
+          </div>
+
+        </section>
+
       </div>
-    </section>
-  </div>
-</main>
-
-
-)
+    </main>
+  )
 }
 
-function StatCard({
-label,
-value,
+// ======================================================
+// VERIFICATION ITEM
+// ======================================================
+
+function VerificationItem({
+  label,
+  passed,
+  value,
 }: {
-label: string
-value: string | number
+  label: string
+  passed: boolean
+  value: string
 }) {
-return ( <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-5"> <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-{label} </p>
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-zinc-800 bg-black p-4">
 
+      <div className="flex items-center gap-3">
 
-  <p className="mt-2 text-3xl font-bold text-white">
-    {value}
-  </p>
-</div>
+        <span
+          className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-black ${
+            passed
+              ? "bg-green-500/10 text-green-400"
+              : "bg-red-500/10 text-red-400"
+          }`}
+        >
+          {passed ? "✓" : "!"}
+        </span>
 
+        <span className="text-sm font-medium text-zinc-300">
+          {label}
+        </span>
 
-)
-}
+      </div>
 
-function MiniStat({
-label,
-value,
-}: {
-label: string
-value: string | number
-}) {
-return ( <div className="rounded-lg border border-zinc-800 bg-black px-3 py-2"> <p className="text-[10px] uppercase tracking-wider text-zinc-600">
-{label} </p>
+      <span
+        className={`text-xs font-bold ${
+          passed
+            ? "text-green-400"
+            : "text-red-400"
+        }`}
+      >
+        {value}
+      </span>
 
-
-  <p className="mt-1 text-sm font-bold text-zinc-200">
-    {value}
-  </p>
-</div>
-
-
-)
-}
-
-function SectionHeading({
-children,
-}: {
-children: React.ReactNode
-}) {
-return ( <h2 className="mb-4 text-lg font-bold text-white">
-{children} </h2>
-)
-}
-
-function FighterCard({
-fighter,
-}: {
-fighter: Fighter
-}) {
-return ( <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4"> <div className="flex items-start justify-between gap-3"> <div> <h3 className="font-semibold text-zinc-100">
-{fighter.firstName}{" "}
-{fighter.lastName} </h3>
-
-
-      <p className="mt-1 font-mono text-[10px] text-zinc-600">
-        ID: {fighter.id}
-      </p>
-
-      <p className="mt-2 text-xs text-zinc-500">
-        {fighter.nationality}
-        {" · "}
-        {fighter.weightClass}
-      </p>
     </div>
-
-    <span className="rounded-full border border-zinc-800 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-      {fighter.tier}
-    </span>
-  </div>
-
-  <div className="mt-4 flex items-center justify-between">
-    <span className="text-sm text-zinc-400">
-      {fighter.wins}-{fighter.losses}
-      {fighter.draws > 0
-        ? "-" + fighter.draws
-        : ""}
-    </span>
-
-    <span className="text-sm font-semibold text-zinc-300">
-      {getFighterStrength(
-        fighter
-      ).toFixed(1)}
-    </span>
-  </div>
-</div>
-
-)
+  )
 }
 
-function formatDivisionName(
-gender: string,
-weightClass: string
-) {
-if (gender === "Female") {
-return "Women's " + weightClass
+// ======================================================
+// SIMULATION STAT
+// ======================================================
+
+function SimulationStat({
+  label,
+  value,
+}: {
+  label: string
+  value: number
+}) {
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-black p-4">
+
+      <div className="text-xs uppercase tracking-wider text-zinc-600">
+        {label}
+      </div>
+
+      <div className="mt-2 text-2xl font-black">
+        {value}
+      </div>
+
+    </div>
+  )
 }
 
-return "Men's " + weightClass
+// ======================================================
+// EVENT CARD
+// ======================================================
+
+function EventCard({
+  event,
+  getFighterName,
+  getPromotionName,
+}: {
+  event: Event
+  getFighterName: (
+    fighterId: string
+  ) => string
+  getPromotionName: (
+    promotionId: string
+  ) => string
+}) {
+  const isChampionship =
+    event.type === "Championship"
+
+  return (
+    <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
+
+      {/* Event Header */}
+
+      <div className="border-b border-zinc-800 p-6">
+
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+
+          <div>
+
+            <div className="flex flex-wrap items-center gap-3">
+
+              <span
+                className={`rounded-full border px-3 py-1 text-[10px] font-black uppercase tracking-wider ${
+                  isChampionship
+                    ? "border-yellow-500/30 bg-yellow-500/10 text-yellow-400"
+                    : "border-red-500/30 bg-red-500/10 text-red-400"
+                }`}
+              >
+                {event.type}
+              </span>
+
+              <span className="text-xs text-zinc-600">
+                {event.id}
+              </span>
+
+            </div>
+
+            <h3 className="mt-4 text-2xl font-black">
+              {event.name}
+            </h3>
+
+            <div className="mt-3 text-sm text-zinc-400">
+              {getPromotionName(
+                event.promotionId
+              )}
+            </div>
+
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+
+            <EventStat
+              label="Date"
+              value={event.date}
+            />
+
+            <EventStat
+              label="Type"
+              value={event.type}
+            />
+
+            <EventStat
+              label="Fights"
+              value={event.fights.length.toString()}
+            />
+
+            <EventStat
+              label="Status"
+              value="Scheduled"
+            />
+
+          </div>
+
+        </div>
+
+        <div className="mt-5 grid gap-3 text-sm sm:grid-cols-2">
+
+          <div className="rounded-lg border border-zinc-800 bg-black p-4">
+
+            <div className="text-xs uppercase tracking-wider text-zinc-600">
+              Venue
+            </div>
+
+            <div className="mt-1 font-semibold text-zinc-300">
+              {event.venue}
+            </div>
+
+          </div>
+
+          <div className="rounded-lg border border-zinc-800 bg-black p-4">
+
+            <div className="text-xs uppercase tracking-wider text-zinc-600">
+              Location
+            </div>
+
+            <div className="mt-1 font-semibold text-zinc-300">
+              {event.location}
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+
+      {/* Fight Card */}
+
+      <div className="p-6">
+
+        <div className="mb-5 flex items-center justify-between">
+
+          <div>
+
+            <h4 className="text-lg font-bold">
+              Fight Card
+            </h4>
+
+            <p className="mt-1 text-xs text-zinc-600">
+              {event.fights.length} scheduled fights
+            </p>
+
+          </div>
+
+          <div className="text-xs font-bold uppercase tracking-wider text-zinc-600">
+            Main Event → Prelims
+          </div>
+
+        </div>
+
+        <div className="space-y-2">
+
+          {event.fights.map(
+            (
+              scheduledFight,
+              index
+            ) => {
+              const fighterA =
+                getFighterName(
+                  scheduledFight.matchup
+                    .fighterAId
+                )
+
+              const fighterB =
+                getFighterName(
+                  scheduledFight.matchup
+                    .fighterBId
+                )
+
+              // Fight cards are displayed in order:
+              //
+              // First fights     = Prelims
+              // Second-last      = Co-Main Event
+              // Last fight       = Main Event
+              //
+              // We use the actual array position rather
+              // than a fixed fight count because some
+              // Championship events may contain fewer
+              // than 10 fights.
+
+              const isMainEvent =
+                index ===
+                event.fights.length - 1
+
+              const isCoMainEvent =
+                event.fights.length >= 2 &&
+                index ===
+                  event.fights.length - 2
+
+              const isTitleFight =
+                scheduledFight.configuration
+                  .titleFight
+
+              return (
+                <div
+                  key={`${event.id}-${scheduledFight.fightOrder}`}
+                  className="rounded-xl border border-zinc-800 bg-black p-4"
+                >
+
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+
+                    <div className="flex items-start gap-4">
+
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-zinc-900 text-sm font-black text-zinc-500">
+                        {scheduledFight.fightOrder}
+                      </div>
+
+                      <div>
+
+                        <div className="flex flex-wrap items-center gap-2">
+
+                          {isMainEvent && (
+                            <span className="rounded bg-red-500/10 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-red-400">
+                              Main Event
+                            </span>
+                          )}
+
+                          {isCoMainEvent && (
+                            <span className="rounded bg-orange-500/10 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-orange-400">
+                              Co-Main Event
+                            </span>
+                          )}
+
+                          {isTitleFight && (
+                            <span className="rounded bg-yellow-500/10 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-yellow-400">
+                              Title Fight
+                            </span>
+                          )}
+
+                        </div>
+
+                        <div className="mt-2 text-base font-bold">
+
+                          {fighterA}
+
+                          <span className="mx-2 text-zinc-700">
+                            vs
+                          </span>
+
+                          {fighterB}
+
+                        </div>
+
+                        <div className="mt-1 text-xs text-zinc-600">
+                          {scheduledFight.matchup.divisionId}
+                        </div>
+
+                      </div>
+
+                    </div>
+
+                    <div className="flex items-center gap-4 text-xs">
+
+                      <span
+                        className={
+                          scheduledFight
+                            .configuration
+                            .rounds === 5
+                            ? "font-bold text-red-400"
+                            : "text-zinc-500"
+                        }
+                      >
+                        {
+                          scheduledFight
+                            .configuration
+                            .rounds
+                        }{" "}
+                        Rounds
+                      </span>
+
+                      <span
+                        className={
+                          isTitleFight
+                            ? "font-bold text-yellow-400"
+                            : "text-zinc-600"
+                        }
+                      >
+                        {isTitleFight
+                          ? "Title"
+                          : "Non-Title"}
+                      </span>
+
+                    </div>
+
+                  </div>
+
+                </div>
+              )
+            }
+          )}
+
+        </div>
+
+      </div>
+
+    </div>
+  )
 }
 
-function getDivisionOrder(
-weightClass: string
-): number {
-const order: Record<string, number> = {
-Strawweight: 1,
-Flyweight: 2,
-Bantamweight: 3,
-Featherweight: 4,
-Lightweight: 5,
-Welterweight: 6,
-Middleweight: 7,
-"Light Heavyweight": 8,
-Heavyweight: 9,
+// ======================================================
+// EVENT STAT
+// ======================================================
+
+function EventStat({
+  label,
+  value,
+}: {
+  label: string
+  value: string
+}) {
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-black px-4 py-3">
+
+      <div className="text-[10px] uppercase tracking-wider text-zinc-600">
+        {label}
+      </div>
+
+      <div className="mt-1 truncate text-xs font-bold text-zinc-300">
+        {value}
+      </div>
+
+    </div>
+  )
 }
 
-return order[weightClass] ?? 99
-}
-
-function getFighterStrength(
-fighter: Fighter
-): number {
-const technical =
-fighter.striking +
-fighter.wrestling +
-fighter.bjj +
-fighter.takedownDefense +
-fighter.accuracy
-
-const physical =
-fighter.power +
-fighter.speed +
-fighter.cardio +
-fighter.chin +
-fighter.strength
-
-const mental =
-fighter.fightIQ +
-fighter.heart +
-fighter.aggression +
-fighter.composure
-
-return (
-technical +
-physical +
-mental
-) / 14
-}

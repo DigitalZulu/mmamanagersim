@@ -14,9 +14,13 @@ export type FemaleWeightClass =
   | "Bantamweight"
   | "Featherweight"
 
-export type Gender = "Male" | "Female"
+export type Gender =
+  | "Male"
+  | "Female"
 
-export type Stance = "Orthodox" | "Southpaw"
+export type Stance =
+  | "Orthodox"
+  | "Southpaw"
 
 export type FighterStyle =
   | "Boxer"
@@ -36,19 +40,24 @@ export type FighterTier =
 
 export type Fighter = {
   id: string
+
   firstName: string
   lastName: string
   nickname?: string
 
   nationality: string
+
   gender: Gender
-  weightClass: MaleWeightClass | FemaleWeightClass
+
+  weightClass:
+    | MaleWeightClass
+    | FemaleWeightClass
 
   age: number
   height: number
   reach: number
-  stance: Stance
 
+  stance: Stance
   style: FighterStyle
   tier: FighterTier
 
@@ -78,4 +87,22 @@ export type Fighter = {
   popularity: number
 
   personality: string[]
+}
+
+export type Division = {
+  id: string
+
+  promotionId: string
+
+  gender: Gender
+
+  weightClass:
+    | MaleWeightClass
+    | FemaleWeightClass
+
+  fighterIds: string[]
+
+  championId: string | null
+
+  rankings: string[]
 }
